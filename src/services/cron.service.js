@@ -70,10 +70,14 @@ const syncPartnerData = async () => {
 
     try {
         const ProviderService = require("../modules/nguona/nguona.service");
-        const [gamesResult, packagesResult] = await Promise.all([
-            ProviderService.syncGames(),
-            ProviderService.syncPackages(),
-        ]);
+        const gamesResult = await ProviderService.syncGames();
+        const packagesResult = gamesResult?.success
+            ? await ProviderService.syncPackages()
+            : {
+                  success: false,
+                  skipped: true,
+                  message: "Skipped package sync because game sync failed.",
+              };
 
         return {
             status: "success",
