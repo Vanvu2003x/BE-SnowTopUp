@@ -6,6 +6,11 @@ const { db } = require("../../configs/drizzle");
 const { games, topupPackages } = require("../../db/schema");
 
 const PARTNER_BASE_URL = (process.env.PARTNER_API_URL || process.env.NGUONA_API_URL || "https://turbo.id.vn/api/partner").replace(/\/+$/, "");
+const PARTNER_CATALOG_BASE_URL = (
+    process.env.PARTNER_CATALOG_API_URL ||
+    process.env.PARTNER_PUBLIC_API_URL ||
+    PARTNER_BASE_URL.replace(/\/partner$/, "")
+).replace(/\/+$/, "");
 const PARTNER_API_KEY = process.env.PARTNER_API_KEY || process.env.NGUONA_API_KEY;
 const PARTNER_PRICE_RATE = Number(process.env.PARTNER_PRICE_RATE || process.env.PARTNER_PRICE_MULTIPLIER || 26000);
 const SOURCE_CODE = "partner";
@@ -36,6 +41,14 @@ const resolveNumber = (value, fallback = 0) => {
 };
 
 const buildApiPrice = (remotePrice) => Math.ceil(toNumber(remotePrice, 0) * PARTNER_PRICE_RATE);
+
+const resolveRemotePackagePrice = (remotePackage = {}) =>
+    remotePackage?.originalPrice ??
+    remotePackage?.sellPriceUsdAdmin ??
+    remotePackage?.sellPriceUsdAgent ??
+    remotePackage?.sellPriceUsd ??
+    remotePackage?.price ??
+    0;
 
 const getMarkupCoefficient = (game) => {
     const markup = toNumber(game?.origin_markup_percent, 0);
@@ -91,13 +104,20 @@ const buildPackageFileApi = (game, remotePackage) => ({
     category: remotePackage?.category || null,
     diamondAmount: remotePackage?.diamondAmount ?? null,
     bonus: remotePackage?.bonus ?? 0,
+    externalId: remotePackage?.externalId || null,
+    ownerGameId: remotePackage?.ownerGameId || null,
+    ownerGameSlug: remotePackage?.ownerGameSlug || null,
+    ownerGameName: remotePackage?.ownerGameName || null,
+    ownerGameDisplayName: remotePackage?.ownerGameDisplayName || null,
+    ownerGameSourceType: remotePackage?.ownerGameSourceType || null,
+    sortOrder: remotePackage?.sortOrder ?? null,
 });
 
 const computePriceFromPercent = (originPrice, percent) =>
     Math.max(0, Math.ceil(toNumber(originPrice, 0) * (1 + toNumber(percent, 0) / 100)));
 
 const buildPricing = (game, existingPackage, remotePackage) => {
-    const apiPrice = buildApiPrice(remotePackage?.price);
+    const apiPrice = buildApiPrice(resolveRemotePackagePrice(remotePackage));
     const originPrice = Math.ceil(apiPrice * getMarkupCoefficient(game));
     const percentBasic = resolveNumber(existingPackage?.profit_percent_basic, 0);
     const percentPro = resolveNumber(existingPackage?.profit_percent_pro, 0);
@@ -144,9 +164,13 @@ const findExistingPackage = async (gameId, apiId, packageName) => {
             .from(topupPackages)
             .where(and(eq(topupPackages.game_id, gameId), eq(topupPackages.api_id, apiId)))
             .limit(1);
+
+        if (existing) {
+            return existing;
+        }
     }
 
-    if (!existing && packageName) {
+    if (!apiId && packageName) {
         [existing] = await db
             .select()
             .from(topupPackages)
@@ -154,7 +178,7 @@ const findExistingPackage = async (gameId, apiId, packageName) => {
             .limit(1);
     }
 
-    if (!existing && packageName) {
+    if (!apiId && !existing && packageName) {
         [existing] = await db
             .select()
             .from(topupPackages)
@@ -163,6 +187,31 @@ const findExistingPackage = async (gameId, apiId, packageName) => {
     }
 
     return existing || null;
+};
+
+const buildPackageSourceKey = ({ apiId = null, packageName = null }) => {
+    const normalizedApiId = sanitizeApiId(apiId);
+    if (normalizedApiId) {
+        return `api:${normalizedApiId}`;
+    }
+
+    const normalizedName = String(packageName || "").trim().toLowerCase();
+    if (normalizedName) {
+        return `name:${normalizedName}`;
+    }
+
+    return null;
+};
+
+const getLocalPackageSourceKey = (pkg) => {
+    if (!pkg?.api_id && !pkg?.api_package_name) {
+        return null;
+    }
+
+    return buildPackageSourceKey({
+        apiId: pkg?.api_id,
+        packageName: pkg?.api_package_name || pkg?.package_name,
+    });
 };
 
 const upsertRemoteGame = async (remoteGame) => {
@@ -176,7 +225,7 @@ const upsertRemoteGame = async (remoteGame) => {
     const inputFields = normalizeInputFields(remoteGame?.inputFields || remoteGame?.input_fields);
     const existing = await findExistingGame(gamecode, apiId);
     const apiName = remoteGame?.displayName || remoteGame?.name || gamecode;
-    const apiThumbnail = remoteGame?.thumbnail || null;
+    const apiThumbnail = remoteGame?.imageUrl || remoteGame?.thumbnail || null;
     const resolvedName = existing?.custom_name || apiName;
     const resolvedThumbnail = existing?.custom_thumbnail || apiThumbnail || existing?.thumbnail || null;
 
@@ -226,18 +275,21 @@ const upsertRemoteGame = async (remoteGame) => {
 };
 
 const ProviderService = {
-    _callApi: async (method, endpoint, data = null) => {
-        if (!PARTNER_API_KEY) {
-            throw new Error("Missing PARTNER_API_KEY in environment");
-        }
-
+    _callJsonApi: async ({
+        method,
+        baseUrl,
+        endpoint,
+        data = null,
+        includeApiKey = false,
+        label = "Partner API",
+    }) => {
         try {
             const response = await axios({
                 method,
-                url: `${PARTNER_BASE_URL}${endpoint}`,
+                url: `${baseUrl}${endpoint}`,
                 timeout: 30000,
                 headers: {
-                    "x-api-key": PARTNER_API_KEY,
+                    ...(includeApiKey && PARTNER_API_KEY ? { "x-api-key": PARTNER_API_KEY } : {}),
                     ...(data ? { "Content-Type": "application/json" } : {}),
                 },
                 ...(data ? { data } : {}),
@@ -246,16 +298,107 @@ const ProviderService = {
             return response.data;
         } catch (error) {
             const details = error.response?.data || error.message;
-            console.error(`[Partner API] ${method} ${endpoint} failed:`, JSON.stringify(details, null, 2));
+            console.error(`[${label}] ${method} ${endpoint} failed:`, JSON.stringify(details, null, 2));
             throw error;
         }
     },
 
+    _callApi: async (method, endpoint, data = null) => {
+        if (!PARTNER_API_KEY) {
+            throw new Error("Missing PARTNER_API_KEY in environment");
+        }
+
+        return ProviderService._callJsonApi({
+            method,
+            baseUrl: PARTNER_BASE_URL,
+            endpoint,
+            data,
+            includeApiKey: true,
+            label: "Partner API",
+        });
+    },
+
+    _callCatalogApi: async (method, endpoint, data = null) =>
+        ProviderService._callJsonApi({
+            method,
+            baseUrl: PARTNER_CATALOG_BASE_URL,
+            endpoint,
+            data,
+            includeApiKey: Boolean(PARTNER_API_KEY),
+            label: "Partner Catalog",
+        }),
+
+    fetchRemoteGames: async () => {
+        try {
+            const res = await ProviderService._callCatalogApi("GET", "/games");
+            return {
+                mode: "catalog",
+                endpoint: "/games",
+                data: Array.isArray(res?.data) ? res.data : [],
+            };
+        } catch (catalogError) {
+            const res = await ProviderService._callApi("GET", "/games");
+            return {
+                mode: "partner",
+                endpoint: "/games",
+                data: Array.isArray(res?.data) ? res.data : [],
+            };
+        }
+    },
+
+    fetchPackagesForGame: async (game) => {
+        const slug = String(game?.gamecode || "").trim();
+        const apiId = sanitizeApiId(game?.api_id);
+        const attempts = [];
+
+        if (slug) {
+            attempts.push({
+                mode: "catalog-slug",
+                endpoint: `/packages?slug=${encodeURIComponent(slug)}`,
+                request: () => ProviderService._callCatalogApi("GET", `/packages?slug=${encodeURIComponent(slug)}`),
+            });
+        }
+
+        if (apiId) {
+            attempts.push({
+                mode: "catalog-game-id",
+                endpoint: `/packages?gameId=${encodeURIComponent(apiId)}`,
+                request: () => ProviderService._callCatalogApi("GET", `/packages?gameId=${encodeURIComponent(apiId)}`),
+            });
+            attempts.push({
+                mode: "partner-id",
+                endpoint: `/packages/${encodeURIComponent(apiId)}`,
+                request: () => ProviderService._callApi("GET", `/packages/${encodeURIComponent(apiId)}`),
+            });
+        }
+
+        let lastError = null;
+
+        for (const attempt of attempts) {
+            try {
+                const res = await attempt.request();
+                return {
+                    mode: attempt.mode,
+                    endpoint: attempt.endpoint,
+                    data: Array.isArray(res?.data) ? res.data : [],
+                };
+            } catch (error) {
+                lastError = error;
+            }
+        }
+
+        throw lastError || new Error(`No package endpoint available for game ${game?.gamecode || "unknown"}`);
+    },
+
     syncGames: async () => {
         try {
-            const res = await ProviderService._callApi("GET", "/games");
-            const remoteGames = Array.isArray(res?.data) ? res.data : [];
+            const source = await ProviderService.fetchRemoteGames();
+            const remoteGames = Array.isArray(source?.data) ? source.data : [];
             const syncedGames = [];
+
+            console.log(
+                `[Partner API] Games fetched from ${source.mode}:${source.endpoint} | total=${remoteGames.length}`
+            );
 
             for (const remoteGame of remoteGames) {
                 const syncedGame = await upsertRemoteGame(remoteGame);
@@ -284,6 +427,8 @@ const ProviderService = {
                     ? gamesToSync
                     : await db.select().from(games).where(eq(games.api_source, SOURCE_CODE));
             let totalPackages = 0;
+            let deactivatedCount = 0;
+            let reactivatedCount = 0;
             const perGame = [];
 
             for (const game of syncedGames) {
@@ -292,20 +437,44 @@ const ProviderService = {
                 }
 
                 try {
-                    const res = await ProviderService._callApi("GET", `/packages/${encodeURIComponent(game.api_id)}`);
-                    const remotePackages = Array.isArray(res?.data) ? res.data : [];
+                    console.log(
+                        `[Partner API] Fetching packages for game ${game.gamecode} (api_id=${game.api_id})`
+                    );
+                    const source = await ProviderService.fetchPackagesForGame(game);
+                    const remotePackages = Array.isArray(source?.data) ? source.data : [];
+                    const packagePreview = remotePackages
+                        .slice(0, 5)
+                        .map((item) => `${sanitizeApiId(item?.id) || "no-id"}:${item?.displayName || item?.name || "Unnamed"}`)
+                        .join(", ");
+
+                    console.log(
+                        `[Partner API] Packages fetched for ${game.gamecode}: source=${source.mode}:${source.endpoint} total=${remotePackages.length}${packagePreview ? ` | preview=${packagePreview}` : ""}`
+                    );
                     totalPackages += remotePackages.length;
+                    const seenPackageKeys = new Set();
                     const packageType = inferPackageType(game?.input_fields || []);
                     const defaultRequiresIdServer = inferRequiresIdServer(game?.input_fields || []);
+                    let gameDeactivatedCount = 0;
+                    let gameReactivatedCount = 0;
 
                     for (const remotePackage of remotePackages) {
                         const apiId = sanitizeApiId(remotePackage?.id);
                         const packageName = remotePackage?.displayName || remotePackage?.name || `Goi ${apiId}`;
+                        const sourceKey = buildPackageSourceKey({
+                            apiId,
+                            packageName,
+                        });
+                        if (sourceKey) {
+                            seenPackageKeys.add(sourceKey);
+                        }
                         const existingPackage = await findExistingPackage(game.id, apiId, packageName);
                         const pricing = buildPricing(game, existingPackage, remotePackage);
                         const fileAPI = buildPackageFileApi(game, remotePackage);
                         const resolvedPackageName =
                             existingPackage?.custom_package_name || packageName;
+                        const nextStatus = remotePackage?.isActive === false ? "inactive" : "active";
+                        const shouldReactivate =
+                            existingPackage?.status === "inactive" && nextStatus === "active";
 
                         const payload = {
                             api_id: apiId,
@@ -314,8 +483,13 @@ const ProviderService = {
                             custom_package_name: existingPackage?.custom_package_name || null,
                             package_name: resolvedPackageName,
                             package_type: existingPackage?.package_type || packageType,
-                            thumbnail: remotePackage?.thumbnail || existingPackage?.thumbnail || game?.thumbnail || null,
-                            status: existingPackage?.status || "active",
+                            thumbnail:
+                                remotePackage?.thumbnailUrl ||
+                                remotePackage?.thumbnail ||
+                                existingPackage?.thumbnail ||
+                                game?.thumbnail ||
+                                null,
+                            status: nextStatus,
                             sale: existingPackage?.sale || false,
                             id_server:
                                 existingPackage?.id_server !== undefined && existingPackage?.id_server !== null
@@ -334,8 +508,13 @@ const ProviderService = {
                                     custom_package_name: existingPackage.custom_package_name || null,
                                     package_name: resolvedPackageName,
                                     package_type: existingPackage.package_type || packageType,
-                                    thumbnail: remotePackage?.thumbnail || existingPackage.thumbnail || game?.thumbnail || null,
-                                    status: existingPackage.status || "active",
+                                    thumbnail:
+                                        remotePackage?.thumbnailUrl ||
+                                        remotePackage?.thumbnail ||
+                                        existingPackage.thumbnail ||
+                                        game?.thumbnail ||
+                                        null,
+                                    status: nextStatus,
                                     sale: existingPackage.sale || false,
                                     id_server:
                                         existingPackage.id_server !== undefined && existingPackage.id_server !== null
@@ -351,29 +530,79 @@ const ProviderService = {
                                 ...payload,
                             });
                         }
+
+                        if (shouldReactivate) {
+                            reactivatedCount += 1;
+                            gameReactivatedCount += 1;
+                        }
+                    }
+
+                    const localPackages = await db
+                        .select({
+                            id: topupPackages.id,
+                            api_id: topupPackages.api_id,
+                            api_package_name: topupPackages.api_package_name,
+                            package_name: topupPackages.package_name,
+                            status: topupPackages.status,
+                        })
+                        .from(topupPackages)
+                        .where(eq(topupPackages.game_id, game.id));
+
+                    for (const localPackage of localPackages) {
+                        const localKey = getLocalPackageSourceKey(localPackage);
+                        if (!localKey) {
+                            continue;
+                        }
+
+                        if (seenPackageKeys.has(localKey)) {
+                            continue;
+                        }
+
+                        if (localPackage.status !== "inactive") {
+                            await db
+                                .update(topupPackages)
+                                .set({ status: "inactive" })
+                                .where(eq(topupPackages.id, localPackage.id));
+                            gameDeactivatedCount += 1;
+                            deactivatedCount += 1;
+                        }
                     }
 
                     perGame.push({
                         gamecode: game.gamecode,
                         api_id: game.api_id,
                         packageCount: remotePackages.length,
+                        deactivatedCount: gameDeactivatedCount,
+                        reactivatedCount: gameReactivatedCount,
                         success: true,
                     });
+
+                    console.log(
+                        `[Partner API] Package sync result for ${game.gamecode}: activeFromSource=${remotePackages.length}, reactivated=${gameReactivatedCount}, deactivated=${gameDeactivatedCount}`
+                    );
                 } catch (error) {
                     console.error(`[Partner API] Sync packages failed for game ${game.gamecode}:`, error.message);
                     perGame.push({
                         gamecode: game.gamecode,
                         api_id: game.api_id,
                         packageCount: 0,
+                        deactivatedCount: 0,
+                        reactivatedCount: 0,
                         success: false,
                         error: error.message,
                     });
                 }
             }
 
+            console.log(
+                `[Partner API] Package sync summary: games=${perGame.length}, totalPackages=${totalPackages}, reactivated=${reactivatedCount}, deactivated=${deactivatedCount}`
+            );
+
             return {
                 success: true,
                 count: totalPackages,
+                deactivatedCount,
+                reactivatedCount,
                 games: perGame,
             };
         } catch (error) {
@@ -382,6 +611,8 @@ const ProviderService = {
                 success: false,
                 error: error.message,
                 count: 0,
+                deactivatedCount: 0,
+                reactivatedCount: 0,
                 games: [],
             };
         }
