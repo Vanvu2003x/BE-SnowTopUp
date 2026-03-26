@@ -1,178 +1,265 @@
 const { db } = require("../../configs/drizzle");
 const { topupPackages, games } = require("../../db/schema");
-const { eq, and, ilike, asc, desc, sql, like } = require("drizzle-orm");
+const { eq, and, ilike, asc, sql } = require("drizzle-orm");
 const crypto = require("crypto");
 const { deleteFile } = require("../../utils/file.util");
 
+const normalizeString = (value, maxLength = 255) => {
+    if (value === undefined || value === null) {
+        return undefined;
+    }
+
+    const normalized = String(value).trim();
+    return normalized ? normalized.substring(0, maxLength) : null;
+};
+
+const normalizeInteger = (value, fallback = 0) => {
+    if (value === undefined || value === null || value === "") {
+        return fallback;
+    }
+
+    const numeric = Number(value);
+    if (Number.isNaN(numeric)) {
+        return fallback;
+    }
+
+    return Math.max(0, Math.round(numeric));
+};
+
+const normalizePercent = (value, fallback = 0) => {
+    if (value === undefined || value === null || value === "") {
+        return fallback;
+    }
+
+    const numeric = Number(value);
+    if (Number.isNaN(numeric)) {
+        return fallback;
+    }
+
+    return numeric;
+};
+
+const normalizeBoolean = (value, fallback = false) => {
+    if (value === undefined || value === null || value === "") {
+        return fallback;
+    }
+
+    if (typeof value === "string") {
+        return ["true", "1", "yes", "on"].includes(value.trim().toLowerCase());
+    }
+
+    return Boolean(value);
+};
+
+const normalizeStatus = (value, fallback = "active") => {
+    if (value === undefined || value === null || value === "") {
+        return fallback;
+    }
+
+    const normalized = String(value).trim().toLowerCase();
+    return normalized === "inactive" ? "inactive" : "active";
+};
+
+const computePriceFromPercent = (originPrice, percent) =>
+    Math.max(0, Math.ceil(Number(originPrice || 0) * (1 + Number(percent || 0) / 100)));
+
+const resolveDisplayName = (pkg) =>
+    pkg?.custom_package_name || pkg?.api_package_name || pkg?.package_name || null;
+
+const hydratePackage = (pkg) => {
+    if (!pkg) {
+        return null;
+    }
+
+    return {
+        ...pkg,
+        package_name: resolveDisplayName(pkg),
+    };
+};
+
+const buildNameFields = (data = {}, currentPkg = null) => {
+    const nextApiName = normalizeString(data.api_package_name, 255);
+    const nextCustomName = normalizeString(data.custom_package_name, 255);
+    const fallbackName = normalizeString(data.package_name, 255);
+
+    const apiPackageName =
+        nextApiName !== undefined
+            ? nextApiName
+            : currentPkg?.api_package_name || currentPkg?.package_name || fallbackName || null;
+
+    const customPackageName =
+        nextCustomName !== undefined
+            ? nextCustomName
+            : currentPkg
+                ? currentPkg.custom_package_name
+                : null;
+
+    return {
+        api_package_name: apiPackageName,
+        custom_package_name: customPackageName,
+        package_name: customPackageName || apiPackageName || fallbackName || currentPkg?.package_name || null,
+    };
+};
+
+const buildPricingFields = (data = {}, currentPkg = null) => {
+    const originPrice = normalizeInteger(
+        data.origin_price,
+        currentPkg?.origin_price !== undefined ? currentPkg.origin_price : 0
+    );
+    const apiPrice = normalizeInteger(
+        data.api_price,
+        currentPkg?.api_price !== undefined ? currentPkg.api_price : originPrice
+    );
+
+    const basicPercent = normalizePercent(
+        data.profit_percent_basic,
+        currentPkg?.profit_percent_basic !== undefined ? currentPkg.profit_percent_basic : 0
+    );
+    const proPercent = normalizePercent(
+        data.profit_percent_pro,
+        currentPkg?.profit_percent_pro !== undefined ? currentPkg.profit_percent_pro : 0
+    );
+    const plusPercent = normalizePercent(
+        data.profit_percent_plus,
+        currentPkg?.profit_percent_plus !== undefined ? currentPkg.profit_percent_plus : 0
+    );
+
+    return {
+        api_price: apiPrice,
+        origin_price: originPrice,
+        profit_percent_basic: basicPercent,
+        profit_percent_pro: proPercent,
+        profit_percent_plus: plusPercent,
+        profit_percent_user: currentPkg?.profit_percent_user || 0,
+        price_basic: computePriceFromPercent(originPrice, basicPercent),
+        price_pro: computePriceFromPercent(originPrice, proPercent),
+        price_plus: computePriceFromPercent(originPrice, plusPercent),
+        price: computePriceFromPercent(originPrice, basicPercent),
+    };
+};
+
 const PackageService = {
     getAllPackages: async () => {
-        return await db.select().from(topupPackages).orderBy(asc(topupPackages.price));
+        const result = await db.select().from(topupPackages).orderBy(asc(topupPackages.price_basic));
+        return result.map(hydratePackage);
     },
 
     getPackageById: async (id) => {
         const [result] = await db.select().from(topupPackages).where(eq(topupPackages.id, id));
-        return result || null;
+        return hydratePackage(result || null);
     },
 
-    /**
-     * Get packages by game code - SIMPLIFIED VERSION
-     * Returns all price tiers, FE will handle display based on user level
-     */
     getPackagesByGameCode: async (game_code, id_server = null) => {
-        const conditions = [
-            eq(games.gamecode, game_code),
-            eq(topupPackages.status, 'active') // Only return active packages
-        ];
+        const conditions = [eq(games.gamecode, game_code), eq(topupPackages.status, "active")];
 
         if (id_server) {
             conditions.push(eq(topupPackages.id_server, id_server));
         }
 
-        const packages = await db.select({
-            id: topupPackages.id,
-            api_id: topupPackages.api_id,
-            package_name: topupPackages.package_name,
-            game_id: topupPackages.game_id,
-            // Return ALL prices - FE will choose based on user level
-            price: topupPackages.price,
-            price_basic: topupPackages.price_basic,
-            price_pro: topupPackages.price_pro,
-            price_plus: topupPackages.price_plus,
-            origin_price: topupPackages.origin_price,
-            thumbnail: topupPackages.thumbnail,
-            package_type: topupPackages.package_type,
-            status: topupPackages.status,
-            fileAPI: topupPackages.fileAPI,
-            id_server: topupPackages.id_server,
-            sale: topupPackages.sale
-        })
+        const result = await db
+            .select({
+                id: topupPackages.id,
+                api_id: topupPackages.api_id,
+                api_package_name: topupPackages.api_package_name,
+                custom_package_name: topupPackages.custom_package_name,
+                package_name: topupPackages.package_name,
+                game_id: topupPackages.game_id,
+                price: topupPackages.price,
+                price_basic: topupPackages.price_basic,
+                price_pro: topupPackages.price_pro,
+                price_plus: topupPackages.price_plus,
+                origin_price: topupPackages.origin_price,
+                api_price: topupPackages.api_price,
+                thumbnail: topupPackages.thumbnail,
+                package_type: topupPackages.package_type,
+                status: topupPackages.status,
+                fileAPI: topupPackages.fileAPI,
+                id_server: topupPackages.id_server,
+                sale: topupPackages.sale,
+                profit_percent_basic: topupPackages.profit_percent_basic,
+                profit_percent_pro: topupPackages.profit_percent_pro,
+                profit_percent_plus: topupPackages.profit_percent_plus,
+            })
             .from(topupPackages)
             .innerJoin(games, eq(topupPackages.game_id, games.id))
             .where(and(...conditions))
-            .orderBy(asc(topupPackages.price_basic)); // Sort by basic price
+            .orderBy(asc(topupPackages.price_basic));
 
-        return packages;
+        return result.map(hydratePackage);
     },
 
     createPackage: async (data, file) => {
-        let parsedFileAPI = null;
-        if (data.fileAPI) {
-            try {
-                parsedFileAPI = typeof data.fileAPI === 'string' ? JSON.parse(data.fileAPI) : data.fileAPI;
-            } catch (error) {
-                console.error("Invalid JSON in fileAPI:", error.message);
-                parsedFileAPI = null;
-            }
-        }
-
-        // Handle File
-        let thumbnailPath = data.thumbnail;
-        if (file) {
-            thumbnailPath = file.path;
-        }
-
-        // Fetch Game Settings for Pricing
         const [game] = await db.select().from(games).where(eq(games.id, data.game_id));
         if (!game) throw { status: 404, message: "Game not found" };
 
-        const originPrice = parseInt(data.origin_price || 0);
+        const names = buildNameFields(data);
+        const pricing = buildPricingFields(data);
 
-        // The frontend now sends explicit final prices via the 'profit_percent_' payload properties
-        // to avoid DB migration. So 'profit_percent_X' holds the EXACT ABSOLUTE FINAL PRICE.
-        const priceBasic = data.profit_percent_basic !== undefined ? Number(data.profit_percent_basic) : originPrice;
-        const pricePro = data.profit_percent_pro !== undefined ? Number(data.profit_percent_pro) : originPrice;
-        const pricePlus = data.profit_percent_plus !== undefined ? Number(data.profit_percent_plus) : originPrice;
-        const priceUser = data.profit_percent_user !== undefined ? Number(data.profit_percent_user) : 0;
+        const parsedFileAPI =
+            data.fileAPI !== undefined && data.fileAPI !== null && data.fileAPI !== ""
+                ? typeof data.fileAPI === "string"
+                    ? JSON.parse(data.fileAPI)
+                    : data.fileAPI
+                : null;
 
         const newPackage = {
             id: crypto.randomUUID(),
-            api_id: data.api_id, // Store external ID
-            package_name: data.package_name,
+            api_id: normalizeString(data.api_id, 100) || null,
+            ...names,
             game_id: data.game_id,
-            origin_price: originPrice,
-
-            profit_percent_basic: percentBasic,
-            profit_percent_pro: percentPro,
-            profit_percent_plus: percentPlus,
-            profit_percent_user: percentUser,
-
-            price: priceUser > originPrice ? priceUser : priceBasic, // Default price logic: Use User price if valid calculation, else Basic
-            price_basic: priceBasic,
-            price_pro: pricePro,
-            price_plus: pricePlus,
-
-            thumbnail: thumbnailPath,
-            package_type: data.package_type,
-            id_server: data.id_server,
-            sale: data.sale || false,
+            ...pricing,
+            thumbnail: file?.path || normalizeString(data.thumbnail, 500) || game.thumbnail || null,
+            package_type: normalizeString(data.package_type, 50) || null,
+            status: normalizeStatus(data.status, "active"),
             fileAPI: parsedFileAPI,
+            id_server: normalizeBoolean(data.id_server, false),
+            sale: normalizeBoolean(data.sale, false),
         };
 
         await db.insert(topupPackages).values(newPackage);
-        const [created] = await db.select().from(topupPackages).where(eq(topupPackages.id, newPackage.id));
-        return created;
+        return await PackageService.getPackageById(newPackage.id);
     },
 
     patchPackage: async (id, newStatus) => {
-        await db.update(topupPackages)
-            .set({ status: newStatus })
-            .where(eq(topupPackages.id, id));
-        const [updated] = await db.select().from(topupPackages).where(eq(topupPackages.id, id));
-        return updated;
+        const normalizedStatus = normalizeStatus(newStatus, "active");
+        await db.update(topupPackages).set({ status: normalizedStatus }).where(eq(topupPackages.id, id));
+        return await PackageService.getPackageById(id);
     },
 
     updatePackage: async (id, data, file) => {
-        const currentPkg = await PackageService.getPackageById(id);
-        if (!currentPkg) throw { status: 404, message: "Gói không tồn tại" };
-
-        // Fetch Game to get current percentages
-        const [game] = await db.select().from(games).where(eq(games.id, currentPkg.game_id));
-        if (!game) throw { status: 404, message: "Game associated with this package not found" };
+        const [currentPkg] = await db.select().from(topupPackages).where(eq(topupPackages.id, id));
+        if (!currentPkg) throw { status: 404, message: "Goi khong ton tai" };
 
         const updateData = {};
-        if (data.package_name !== undefined) updateData.package_name = data.package_name;
-        if (data.api_id !== undefined) updateData.api_id = data.api_id;
-        if (data.package_type !== undefined) updateData.package_type = data.package_type;
-        if (data.id_server !== undefined) updateData.id_server = data.id_server;
-        if (data.sale !== undefined) updateData.sale = data.sale;
-        if (data.status !== undefined) updateData.status = data.status;
+        const names = buildNameFields(data, currentPkg);
 
-        // Pricing Logic
-        const originPrice = data.origin_price !== undefined ? parseInt(data.origin_price) : currentPkg.origin_price;
+        if (
+            data.package_name !== undefined ||
+            data.api_package_name !== undefined ||
+            data.custom_package_name !== undefined
+        ) {
+            updateData.api_package_name = names.api_package_name;
+            updateData.custom_package_name = names.custom_package_name;
+            updateData.package_name = names.package_name;
+        }
 
-        const percentBasic = data.profit_percent_basic !== undefined ? Number(data.profit_percent_basic)
-            : (currentPkg.profit_percent_basic !== null ? currentPkg.profit_percent_basic : (game.profit_percent_basic || 0));
+        if (
+            data.origin_price !== undefined ||
+            data.api_price !== undefined ||
+            data.profit_percent_basic !== undefined ||
+            data.profit_percent_pro !== undefined ||
+            data.profit_percent_plus !== undefined
+        ) {
+            Object.assign(updateData, buildPricingFields(data, currentPkg));
+        }
 
-        const percentPro = data.profit_percent_pro !== undefined ? Number(data.profit_percent_pro)
-            : (currentPkg.profit_percent_pro !== null ? currentPkg.profit_percent_pro : (game.profit_percent_pro || 0));
+        if (data.api_id !== undefined) updateData.api_id = normalizeString(data.api_id, 100) || null;
+        if (data.package_type !== undefined) updateData.package_type = normalizeString(data.package_type, 50) || null;
+        if (data.id_server !== undefined) updateData.id_server = normalizeBoolean(data.id_server, false);
+        if (data.sale !== undefined) updateData.sale = normalizeBoolean(data.sale, false);
+        if (data.status !== undefined) updateData.status = normalizeStatus(data.status, currentPkg.status || "active");
+        if (data.thumbnail !== undefined) updateData.thumbnail = normalizeString(data.thumbnail, 500) || null;
 
-        const percentPlus = data.profit_percent_plus !== undefined ? Number(data.profit_percent_plus)
-            : (currentPkg.profit_percent_plus !== null ? currentPkg.profit_percent_plus : (game.profit_percent_plus || 0));
-
-        const priceBasic = data.profit_percent_basic !== undefined ? Number(data.profit_percent_basic)
-            : (currentPkg.price_basic !== null ? currentPkg.price_basic : originPrice);
-        const pricePro = data.profit_percent_pro !== undefined ? Number(data.profit_percent_pro)
-            : (currentPkg.price_pro !== null ? currentPkg.price_pro : originPrice);
-        const pricePlus = data.profit_percent_plus !== undefined ? Number(data.profit_percent_plus)
-            : (currentPkg.price_plus !== null ? currentPkg.price_plus : originPrice);
-        const priceUser = data.profit_percent_user !== undefined ? Number(data.profit_percent_user)
-            : 0;
-
-        // Update stored values 
-        updateData.origin_price = originPrice;
-        updateData.profit_percent_basic = priceBasic;
-        updateData.profit_percent_pro = pricePro;
-        updateData.profit_percent_plus = pricePlus;
-        updateData.profit_percent_user = priceUser;
-
-        // Recalculate Prices
-        updateData.price_basic = priceBasic;
-        updateData.price_pro = pricePro;
-        updateData.price_plus = pricePlus;
-        updateData.price = priceUser > originPrice ? priceUser : priceBasic;
-
-        // Thumbnail
-        if (data.thumbnail !== undefined) updateData.thumbnail = data.thumbnail;
         let oldThumbnailToDelete = null;
         if (file) {
             updateData.thumbnail = file.path;
@@ -181,87 +268,123 @@ const PackageService = {
             }
         }
 
-        // FileAPI
         if (data.fileAPI !== undefined) {
             try {
-                updateData.fileAPI = typeof data.fileAPI === 'string' ? JSON.parse(data.fileAPI) : data.fileAPI;
-            } catch (e) {
+                updateData.fileAPI =
+                    typeof data.fileAPI === "string" ? JSON.parse(data.fileAPI) : data.fileAPI;
+            } catch (error) {
                 updateData.fileAPI = null;
             }
         }
 
         if (Object.keys(updateData).length === 0) {
-            throw { status: 400, message: "Không có dữ liệu nào để cập nhật" };
+            throw { status: 400, message: "Khong co du lieu nao de cap nhat" };
         }
 
         await db.update(topupPackages).set(updateData).where(eq(topupPackages.id, id));
-        const [updated] = await db.select().from(topupPackages).where(eq(topupPackages.id, id));
+
+        const updated = await PackageService.getPackageById(id);
         if (oldThumbnailToDelete && oldThumbnailToDelete !== updated?.thumbnail) {
             deleteFile(oldThumbnailToDelete);
         }
+
         return updated;
     },
 
     getPackagesByType: async (type) => {
-        return await db.select()
+        const result = await db
+            .select()
             .from(topupPackages)
             .where(eq(topupPackages.package_type, type))
-            .orderBy(asc(topupPackages.price));
+            .orderBy(asc(topupPackages.price_basic));
+        return result.map(hydratePackage);
     },
 
     delPackages: async (id) => {
         const [deleted] = await db.select().from(topupPackages).where(eq(topupPackages.id, id));
         await db.delete(topupPackages).where(eq(topupPackages.id, id));
 
-        // Cleanup file
-        if (deleted && deleted.thumbnail) {
+        if (deleted?.thumbnail) {
             deleteFile(deleted.thumbnail);
         }
 
-        return deleted;
+        return hydratePackage(deleted || null);
     },
 
     searchPackages: async ({ keyword = "", game_id = null, id_server = null, sale = null }) => {
-        let conditions = [sql`1=1`]; // Base true condition
+        const conditions = [sql`1=1`];
 
         if (keyword) {
-            conditions.push(ilike(topupPackages.package_name, `%${keyword}%`));
+            conditions.push(
+                and(
+                    sql`1=1`,
+                    sql`(${topupPackages.package_name} IS NOT NULL OR ${topupPackages.api_package_name} IS NOT NULL)`
+                )
+            );
+            conditions.push(
+                sql`(
+                    ${topupPackages.package_name} LIKE ${`%${keyword}%`}
+                    OR ${topupPackages.api_package_name} LIKE ${`%${keyword}%`}
+                    OR ${topupPackages.custom_package_name} LIKE ${`%${keyword}%`}
+                )`
+            );
         }
+
         if (game_id) {
             conditions.push(eq(topupPackages.game_id, game_id));
         }
-        if (id_server !== null) {
-            conditions.push(eq(topupPackages.id_server, id_server));
+        if (id_server !== null && id_server !== undefined && id_server !== "") {
+            conditions.push(eq(topupPackages.id_server, normalizeBoolean(id_server, false)));
         }
-        if (sale !== null) {
-            conditions.push(eq(topupPackages.sale, sale));
+        if (sale !== null && sale !== undefined && sale !== "") {
+            conditions.push(eq(topupPackages.sale, normalizeBoolean(sale, false)));
         }
 
-        return await db.select()
+        const result = await db
+            .select()
             .from(topupPackages)
             .where(and(...conditions))
-            .orderBy(asc(topupPackages.price));
+            .orderBy(asc(topupPackages.origin_price));
+
+        return result.map(hydratePackage);
     },
 
     getPackagePriceById: async (id) => {
-        const [result] = await db.select({ id: topupPackages.id, price: topupPackages.price, package_name: topupPackages.package_name }).from(topupPackages).where(eq(topupPackages.id, id));
-        return result || null;
+        const [result] = await db
+            .select({
+                id: topupPackages.id,
+                price: topupPackages.price,
+                package_name: topupPackages.package_name,
+                api_package_name: topupPackages.api_package_name,
+                custom_package_name: topupPackages.custom_package_name,
+            })
+            .from(topupPackages)
+            .where(eq(topupPackages.id, id));
+
+        return hydratePackage(result || null);
     },
 
     getPackageProfitById: async (id) => {
-        const [result] = await db.select({
-            profit: sql`(${topupPackages.price} - ${topupPackages.origin_price})`
-        }).from(topupPackages).where(eq(topupPackages.id, id));
+        const [result] = await db
+            .select({
+                profit: sql`(${topupPackages.price} - ${topupPackages.origin_price})`,
+            })
+            .from(topupPackages)
+            .where(eq(topupPackages.id, id));
+
         return result ? result.profit : null;
     },
 
     getPackageAmountById: async (id) => {
-        const [result] = await db.select({ price: topupPackages.price }).from(topupPackages).where(eq(topupPackages.id, id));
+        const [result] = await db
+            .select({ price: topupPackages.price })
+            .from(topupPackages)
+            .where(eq(topupPackages.id, id));
+
         return result ? result.price : null;
     },
-    // Aliases & Missing matches
+
     getPackagesByGameSlug: async (game_code, id_server = null) => {
-        // reuse getPackagesByGameCode - simplified version
         return await PackageService.getPackagesByGameCode(game_code, id_server);
     },
 
@@ -274,17 +397,17 @@ const PackageService = {
     },
 
     updateSale: async (id, sale) => {
-        await db.update(topupPackages)
-            .set({ sale: sale })
+        await db
+            .update(topupPackages)
+            .set({ sale: normalizeBoolean(sale, false) })
             .where(eq(topupPackages.id, id));
-        const [updated] = await db.select().from(topupPackages).where(eq(topupPackages.id, id));
-        return updated;
+
+        return await PackageService.getPackageById(id);
     },
 
     getLogTypePackages: async () => {
-        // Fallback implementation based on inferred intent
         return await PackageService.getAllPackages();
-    }
+    },
 };
 
 module.exports = PackageService;

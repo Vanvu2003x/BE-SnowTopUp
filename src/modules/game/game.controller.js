@@ -1,12 +1,37 @@
 const GameService = require("./game.service");
 const asyncHandler = require("../../utils/asyncHandler");
 const { deleteFile } = require("../../utils/file.util");
+const {
+    getPartnerSyncConfig,
+    updatePartnerSyncInterval,
+    runPartnerSyncNow,
+} = require("../../services/cron.service");
 
-const syncExternalSource = async () => {
-    const ProviderService = require("../nguona/nguona.service");
-    await ProviderService.syncGames();
-    await ProviderService.syncPackages();
+const parseGameInfo = (req) => {
+    const infoRaw = req.body.info;
+
+    if (!infoRaw) {
+        throw { status: 400, message: "Thieu thong tin game" };
+    }
+
+    try {
+        return JSON.parse(infoRaw);
+    } catch {
+        throw { status: 400, message: "Thong tin game khong hop le" };
+    }
 };
+
+const getUploadedFilePath = (req, fieldName) => req.files?.[fieldName]?.[0]?.path || null;
+
+const syncSource = asyncHandler(async (req, res) => {
+    const result = await runPartnerSyncNow();
+
+    return res.status(200).json({
+        status: true,
+        message: "Da dong bo du lieu tu nguon doi tac.",
+        result,
+    });
+});
 
 const GameController = {
     getAllGames: asyncHandler(async (req, res) => {
@@ -15,20 +40,17 @@ const GameController = {
     }),
 
     createGame: asyncHandler(async (req, res) => {
-        const infoRaw = req.body.info;
-        if (!infoRaw) {
-            throw { status: 400, message: "Thiếu thông tin game" };
+        const gameInfo = parseGameInfo(req);
+        const thumbnailPath = getUploadedFilePath(req, "thumbnail");
+        const posterPath = getUploadedFilePath(req, "poster");
+
+        if (thumbnailPath) {
+            gameInfo.custom_thumbnail = thumbnailPath;
+            gameInfo.thumbnail = thumbnailPath;
         }
 
-        let gameInfo;
-        try {
-            gameInfo = JSON.parse(infoRaw);
-        } catch {
-            throw { status: 400, message: "Thông tin game không hợp lệ" };
-        }
-
-        if (req.file) {
-            gameInfo.thumbnail = req.file.path;
+        if (posterPath) {
+            gameInfo.poster = posterPath;
         }
 
         const result = await GameService.createGame(gameInfo);
@@ -36,38 +58,52 @@ const GameController = {
     }),
 
     updateGame: asyncHandler(async (req, res) => {
-        const infoRaw = req.body.info;
-        if (!infoRaw) throw { status: 400, message: "Thiếu thông tin game" };
+        const gameInfo = parseGameInfo(req);
+        const currentGame = await GameService.getStoredGameById(req.query.id);
 
-        let gameInfo;
-        try {
-            gameInfo = JSON.parse(infoRaw);
-        } catch {
-            throw { status: 400, message: "Thông tin game không hợp lệ" };
+        if (!currentGame) {
+            throw { status: 404, message: "Game khong ton tai" };
         }
 
+        const thumbnailPath = getUploadedFilePath(req, "thumbnail");
+        const posterPath = getUploadedFilePath(req, "poster");
         let oldThumbnailToDelete = null;
-        if (req.file) {
-            gameInfo.thumbnail = req.file.path;
-            const oldGame = await GameService.getGameById(req.query.id);
-            if (oldGame?.thumbnail) {
-                oldThumbnailToDelete = oldGame.thumbnail;
-            }
+        let oldPosterToDelete = null;
+
+        if (thumbnailPath) {
+            gameInfo.custom_thumbnail = thumbnailPath;
+            gameInfo.thumbnail = thumbnailPath;
+            oldThumbnailToDelete = currentGame.custom_thumbnail || null;
+        }
+
+        if (posterPath) {
+            gameInfo.poster = posterPath;
+            oldPosterToDelete = currentGame.poster || null;
         }
 
         const result = await GameService.updateGame(req.query.id, gameInfo);
-        if (oldThumbnailToDelete && oldThumbnailToDelete !== result?.thumbnail) {
+
+        if (oldThumbnailToDelete && oldThumbnailToDelete !== result?.custom_thumbnail) {
             deleteFile(oldThumbnailToDelete);
+        }
+
+        if (oldPosterToDelete && oldPosterToDelete !== result?.poster) {
+            deleteFile(oldPosterToDelete);
         }
 
         return res.status(200).json(result);
     }),
 
     deleteGame: asyncHandler(async (req, res) => {
+        const storedGame = await GameService.getStoredGameById(req.query.id);
         const result = await GameService.deleteGame(req.query.id);
 
-        if (result?.thumbnail) {
-            deleteFile(result.thumbnail);
+        if (storedGame?.custom_thumbnail) {
+            deleteFile(storedGame.custom_thumbnail);
+        }
+
+        if (storedGame?.poster) {
+            deleteFile(storedGame.poster);
         }
 
         return res.status(200).json(result);
@@ -83,19 +119,26 @@ const GameController = {
         return res.status(200).json(result);
     }),
 
-    syncSource: asyncHandler(async (req, res) => {
-        await syncExternalSource();
-        return res.status(200).json({ status: true, message: "Đang tiến hành đồng bộ dữ liệu từ nguồn đối tác..." });
-    }),
+    syncSource,
 
-    syncNguonA: asyncHandler(async (req, res) => {
-        await syncExternalSource();
-        return res.status(200).json({ status: true, message: "Đang tiến hành đồng bộ dữ liệu từ nguồn đối tác..." });
-    }),
+    syncNguonA: syncSource,
 
     getTopUpGames: asyncHandler(async (req, res) => {
         const result = await GameService.getTopUpGames();
         res.status(200).json(result);
+    }),
+
+    getSyncConfig: asyncHandler(async (req, res) => {
+        const config = await getPartnerSyncConfig();
+        res.status(200).json(config);
+    }),
+
+    updateSyncConfig: asyncHandler(async (req, res) => {
+        const config = await updatePartnerSyncInterval(req.body?.intervalMinutes);
+        res.status(200).json({
+            status: true,
+            ...config,
+        });
     }),
 };
 

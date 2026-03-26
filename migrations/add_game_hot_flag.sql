@@ -1,0 +1,2 @@
+ALTER TABLE games
+ADD COLUMN is_hot BOOLEAN DEFAULT false;

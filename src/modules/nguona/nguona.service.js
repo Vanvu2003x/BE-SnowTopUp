@@ -93,14 +93,19 @@ const buildPackageFileApi = (game, remotePackage) => ({
     bonus: remotePackage?.bonus ?? 0,
 });
 
+const computePriceFromPercent = (originPrice, percent) =>
+    Math.max(0, Math.ceil(toNumber(originPrice, 0) * (1 + toNumber(percent, 0) / 100)));
+
 const buildPricing = (game, existingPackage, remotePackage) => {
     const apiPrice = buildApiPrice(remotePackage?.price);
     const originPrice = Math.ceil(apiPrice * getMarkupCoefficient(game));
+    const percentBasic = resolveNumber(existingPackage?.profit_percent_basic, 0);
+    const percentPro = resolveNumber(existingPackage?.profit_percent_pro, 0);
+    const percentPlus = resolveNumber(existingPackage?.profit_percent_plus, 0);
 
-    const priceBasic = existingPackage?.price_basic > 0 ? existingPackage.price_basic : originPrice;
-    const pricePro = existingPackage?.price_pro > 0 ? existingPackage.price_pro : originPrice;
-    const pricePlus = existingPackage?.price_plus > 0 ? existingPackage.price_plus : originPrice;
-    const priceUser = existingPackage?.priceUser > 0 ? existingPackage.priceUser : 0;
+    const priceBasic = computePriceFromPercent(originPrice, percentBasic);
+    const pricePro = computePriceFromPercent(originPrice, percentPro);
+    const pricePlus = computePriceFromPercent(originPrice, percentPlus);
 
     return {
         api_price: apiPrice,
@@ -108,11 +113,11 @@ const buildPricing = (game, existingPackage, remotePackage) => {
         price_basic: priceBasic,
         price_pro: pricePro,
         price_plus: pricePlus,
-        price: priceUser > originPrice ? priceUser : priceBasic,
-        profit_percent_basic: 0,
-        profit_percent_pro: 0,
-        profit_percent_plus: 0,
-        profit_percent_user: 0,
+        price: priceBasic,
+        profit_percent_basic: percentBasic,
+        profit_percent_pro: percentPro,
+        profit_percent_plus: percentPlus,
+        profit_percent_user: existingPackage?.profit_percent_user || 0,
     };
 };
 
@@ -138,6 +143,14 @@ const findExistingPackage = async (gameId, apiId, packageName) => {
             .select()
             .from(topupPackages)
             .where(and(eq(topupPackages.game_id, gameId), eq(topupPackages.api_id, apiId)))
+            .limit(1);
+    }
+
+    if (!existing && packageName) {
+        [existing] = await db
+            .select()
+            .from(topupPackages)
+            .where(and(eq(topupPackages.game_id, gameId), eq(topupPackages.api_package_name, packageName)))
             .limit(1);
     }
 
@@ -193,16 +206,25 @@ const ProviderService = {
 
                 const inputFields = normalizeInputFields(remoteGame?.inputFields || remoteGame?.input_fields);
                 const existing = await findExistingGame(gamecode, apiId);
+                const apiName = remoteGame?.displayName || remoteGame?.name || gamecode;
+                const apiThumbnail = remoteGame?.thumbnail || null;
+                const resolvedName = existing?.custom_name || apiName;
+                const resolvedThumbnail = existing?.custom_thumbnail || apiThumbnail || existing?.thumbnail || null;
 
                 const payload = {
                     api_id: apiId,
                     api_source: SOURCE_CODE,
-                    name: existing?.name || remoteGame?.displayName || remoteGame?.name || gamecode,
+                    api_name: apiName,
+                    custom_name: existing?.custom_name || null,
+                    name: resolvedName,
                     gamecode,
                     server: Array.isArray(remoteGame?.servers) ? remoteGame.servers : existing?.server || [],
                     input_fields: inputFields,
-                    thumbnail: remoteGame?.thumbnail || existing?.thumbnail || null,
+                    api_thumbnail: apiThumbnail,
+                    custom_thumbnail: existing?.custom_thumbnail || null,
+                    thumbnail: resolvedThumbnail,
                     publisher: remoteGame?.publisher || existing?.publisher || null,
+                    poster: existing?.poster || null,
                 };
 
                 if (existing) {
@@ -214,6 +236,7 @@ const ProviderService = {
                             profit_percent_pro: existing.profit_percent_pro,
                             profit_percent_plus: existing.profit_percent_plus,
                             origin_markup_percent: existing.origin_markup_percent,
+                            is_hot: existing.is_hot,
                         })
                         .where(eq(games.id, existing.id));
                 } else {
@@ -258,11 +281,15 @@ const ProviderService = {
                         const existingPackage = await findExistingPackage(game.id, apiId, packageName);
                         const pricing = buildPricing(game, existingPackage, remotePackage);
                         const fileAPI = buildPackageFileApi(game, remotePackage);
+                        const resolvedPackageName =
+                            existingPackage?.custom_package_name || packageName;
 
                         const payload = {
                             api_id: apiId,
                             game_id: game.id,
-                            package_name: packageName,
+                            api_package_name: packageName,
+                            custom_package_name: existingPackage?.custom_package_name || null,
+                            package_name: resolvedPackageName,
                             package_type: existingPackage?.package_type || packageType,
                             thumbnail: remotePackage?.thumbnail || existingPackage?.thumbnail || game?.thumbnail || null,
                             status: existingPackage?.status || "active",
@@ -280,6 +307,17 @@ const ProviderService = {
                                 .update(topupPackages)
                                 .set({
                                     api_id: apiId || existingPackage.api_id,
+                                    api_package_name: packageName,
+                                    custom_package_name: existingPackage.custom_package_name || null,
+                                    package_name: resolvedPackageName,
+                                    package_type: existingPackage.package_type || packageType,
+                                    thumbnail: remotePackage?.thumbnail || existingPackage.thumbnail || game?.thumbnail || null,
+                                    status: existingPackage.status || "active",
+                                    sale: existingPackage.sale || false,
+                                    id_server:
+                                        existingPackage.id_server !== undefined && existingPackage.id_server !== null
+                                            ? existingPackage.id_server
+                                            : defaultRequiresIdServer,
                                     fileAPI,
                                     ...pricing,
                                 })

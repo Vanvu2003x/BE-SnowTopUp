@@ -32,7 +32,12 @@ const games = mysqlTable('games', {
     api_id: varchar('api_id', { length: 100 }), // ID from external API/Cron
     api_source: varchar('api_source', { length: 50 }), // 'napgame247', 'morishop', 'partner'
     name: varchar('name', { length: 50 }).notNull(),
+    api_name: varchar('api_name', { length: 100 }),
+    custom_name: varchar('custom_name', { length: 100 }),
     thumbnail: varchar('thumbnail', { length: 500 }),
+    api_thumbnail: varchar('api_thumbnail', { length: 500 }),
+    custom_thumbnail: varchar('custom_thumbnail', { length: 500 }),
+    poster: varchar('poster', { length: 500 }),
     server: json('server'), // Array of servers
     input_fields: json('input_fields'), // Store external form fields config (IDs for UID, Server, etc.)
     gamecode: varchar('gamecode', { length: 50 }).unique(),
@@ -41,12 +46,21 @@ const games = mysqlTable('games', {
     profit_percent_basic: int('profit_percent_basic').default(0),
     profit_percent_pro: int('profit_percent_pro').default(0),
     profit_percent_plus: int('profit_percent_plus').default(0),
+    is_hot: boolean('is_hot').default(false),
+});
+
+const appSettings = mysqlTable('app_settings', {
+    setting_key: varchar('setting_key', { length: 100 }).primaryKey(),
+    setting_value: varchar('setting_value', { length: 255 }).notNull(),
+    updated_at: timestamp('updated_at').default(sql`CURRENT_TIMESTAMP`).onUpdateNow(),
 });
 
 // Topup Packages Table
 const topupPackages = mysqlTable('topup_packages', {
     id: varchar('id', { length: 36 }).primaryKey(), // UUID
     api_id: varchar('api_id', { length: 100 }), // ID from external API/Cron
+    api_package_name: varchar('api_package_name', { length: 255 }),
+    custom_package_name: varchar('custom_package_name', { length: 255 }),
     package_name: varchar('package_name', { length: 255 }).notNull(),
     game_id: varchar('game_id', { length: 36 }).notNull(), // FK to games
     price: int('price').notNull(), // Default price (used as fallback)
@@ -190,6 +204,7 @@ const balanceHistoryRelations = relations(balanceHistory, ({ one }) => ({
 module.exports = {
     users,
     games,
+    appSettings,
     topupPackages,
     orders,
     walletLogs,

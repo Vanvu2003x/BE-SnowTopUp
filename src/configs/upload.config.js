@@ -72,5 +72,28 @@ const secureUpload = (fieldName) => {
     };
 };
 
+const secureUploadFields = (fields) => {
+    return (req, res, next) => {
+        upload.fields(fields)(req, res, (err) => {
+            if (err) {
+                console.error('[UPLOAD ERROR]', err.message);
+                return res.status(400).json({ status: false, message: err.message });
+            }
+
+            if (req.files) {
+                Object.keys(req.files).forEach((field) => {
+                    req.files[field] = (req.files[field] || []).map((file) => ({
+                        ...file,
+                        path: `/uploads/${file.filename}`,
+                    }));
+                });
+            }
+
+            next();
+        });
+    };
+};
+
 module.exports = upload;
 module.exports.secureUpload = secureUpload;
+module.exports.secureUploadFields = secureUploadFields;

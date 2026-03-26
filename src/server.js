@@ -59,6 +59,8 @@ socketServer.listen(SOCKET_PORT, () => {
 
 // ✅ Initialize Cron Jobs
 const { initCronJobs } = require('./services/cron.service');
-initCronJobs();
+initCronJobs().catch((error) => {
+  console.error("Failed to initialize cron jobs:", error);
+});
 
 

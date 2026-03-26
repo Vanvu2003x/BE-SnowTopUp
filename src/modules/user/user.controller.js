@@ -23,14 +23,14 @@ const UserController = {
     }),
 
     updateBalance: asyncHandler(async (req, res) => {
-        const { userId, amount, type } = req.body;
-        const result = await UserService.updateBalance(userId, amount, type);
+        const { userId, amount, type, description } = req.body;
+        const result = await UserService.updateBalance(userId, amount, type, description);
         return res.status(200).json(result);
     }),
 
     searchUser: asyncHandler(async (req, res) => {
-        const { role, keyword } = req.query;
-        const result = await UserService.searchUser(role, keyword);
+        const { role, keyword, page, pageSize } = req.query;
+        const result = await UserService.searchUser(role, keyword, page, pageSize);
         return res.json(result);
     }),
 
