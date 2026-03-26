@@ -165,6 +165,66 @@ const findExistingPackage = async (gameId, apiId, packageName) => {
     return existing || null;
 };
 
+const upsertRemoteGame = async (remoteGame) => {
+    const apiId = sanitizeApiId(remoteGame?.id);
+    const gamecode = (remoteGame?.slug || remoteGame?.gamecode || slugify(remoteGame?.displayName || remoteGame?.name)).substring(0, 50);
+
+    if (!gamecode) {
+        return null;
+    }
+
+    const inputFields = normalizeInputFields(remoteGame?.inputFields || remoteGame?.input_fields);
+    const existing = await findExistingGame(gamecode, apiId);
+    const apiName = remoteGame?.displayName || remoteGame?.name || gamecode;
+    const apiThumbnail = remoteGame?.thumbnail || null;
+    const resolvedName = existing?.custom_name || apiName;
+    const resolvedThumbnail = existing?.custom_thumbnail || apiThumbnail || existing?.thumbnail || null;
+
+    const payload = {
+        api_id: apiId,
+        api_source: SOURCE_CODE,
+        api_name: apiName,
+        custom_name: existing?.custom_name || null,
+        name: resolvedName,
+        gamecode,
+        server: Array.isArray(remoteGame?.servers) ? remoteGame.servers : existing?.server || [],
+        input_fields: inputFields,
+        api_thumbnail: apiThumbnail,
+        custom_thumbnail: existing?.custom_thumbnail || null,
+        thumbnail: resolvedThumbnail,
+        publisher: remoteGame?.publisher || existing?.publisher || null,
+        poster: existing?.poster || null,
+    };
+
+    if (existing) {
+        await db
+            .update(games)
+            .set({
+                ...payload,
+                profit_percent_basic: existing.profit_percent_basic,
+                profit_percent_pro: existing.profit_percent_pro,
+                profit_percent_plus: existing.profit_percent_plus,
+                origin_markup_percent: existing.origin_markup_percent,
+                is_hot: existing.is_hot,
+            })
+            .where(eq(games.id, existing.id));
+
+        return {
+            ...existing,
+            ...payload,
+            id: existing.id,
+        };
+    }
+
+    const newGame = {
+        id: randomUUID(),
+        ...payload,
+    };
+
+    await db.insert(games).values(newGame);
+    return newGame;
+};
+
 const ProviderService = {
     _callApi: async (method, endpoint, data = null) => {
         if (!PARTNER_API_KEY) {
@@ -195,74 +255,36 @@ const ProviderService = {
         try {
             const res = await ProviderService._callApi("GET", "/games");
             const remoteGames = Array.isArray(res?.data) ? res.data : [];
+            const syncedGames = [];
 
             for (const remoteGame of remoteGames) {
-                const apiId = sanitizeApiId(remoteGame?.id);
-                const gamecode = (remoteGame?.slug || remoteGame?.gamecode || slugify(remoteGame?.displayName || remoteGame?.name)).substring(0, 50);
-
-                if (!gamecode) {
-                    continue;
-                }
-
-                const inputFields = normalizeInputFields(remoteGame?.inputFields || remoteGame?.input_fields);
-                const existing = await findExistingGame(gamecode, apiId);
-                const apiName = remoteGame?.displayName || remoteGame?.name || gamecode;
-                const apiThumbnail = remoteGame?.thumbnail || null;
-                const resolvedName = existing?.custom_name || apiName;
-                const resolvedThumbnail = existing?.custom_thumbnail || apiThumbnail || existing?.thumbnail || null;
-
-                const payload = {
-                    api_id: apiId,
-                    api_source: SOURCE_CODE,
-                    api_name: apiName,
-                    custom_name: existing?.custom_name || null,
-                    name: resolvedName,
-                    gamecode,
-                    server: Array.isArray(remoteGame?.servers) ? remoteGame.servers : existing?.server || [],
-                    input_fields: inputFields,
-                    api_thumbnail: apiThumbnail,
-                    custom_thumbnail: existing?.custom_thumbnail || null,
-                    thumbnail: resolvedThumbnail,
-                    publisher: remoteGame?.publisher || existing?.publisher || null,
-                    poster: existing?.poster || null,
-                };
-
-                if (existing) {
-                    await db
-                        .update(games)
-                        .set({
-                            ...payload,
-                            profit_percent_basic: existing.profit_percent_basic,
-                            profit_percent_pro: existing.profit_percent_pro,
-                            profit_percent_plus: existing.profit_percent_plus,
-                            origin_markup_percent: existing.origin_markup_percent,
-                            is_hot: existing.is_hot,
-                        })
-                        .where(eq(games.id, existing.id));
-                } else {
-                    await db.insert(games).values({
-                        id: randomUUID(),
-                        ...payload,
-                    });
-                }
+                const syncedGame = await upsertRemoteGame(remoteGame);
+                if (syncedGame) syncedGames.push(syncedGame);
             }
 
             return {
                 success: true,
                 count: remoteGames.length,
+                games: syncedGames,
             };
         } catch (error) {
             console.error("[Partner API] Sync games failed:", error.message);
             return {
                 success: false,
                 error: error.message,
+                games: [],
             };
         }
     },
 
-    syncPackages: async () => {
+    syncPackages: async (gamesToSync = null) => {
         try {
-            const syncedGames = await db.select().from(games).where(eq(games.api_source, SOURCE_CODE));
+            const syncedGames =
+                Array.isArray(gamesToSync) && gamesToSync.length > 0
+                    ? gamesToSync
+                    : await db.select().from(games).where(eq(games.api_source, SOURCE_CODE));
+            let totalPackages = 0;
+            const perGame = [];
 
             for (const game of syncedGames) {
                 if (!game?.api_id) {
@@ -272,6 +294,7 @@ const ProviderService = {
                 try {
                     const res = await ProviderService._callApi("GET", `/packages/${encodeURIComponent(game.api_id)}`);
                     const remotePackages = Array.isArray(res?.data) ? res.data : [];
+                    totalPackages += remotePackages.length;
                     const packageType = inferPackageType(game?.input_fields || []);
                     const defaultRequiresIdServer = inferRequiresIdServer(game?.input_fields || []);
 
@@ -329,19 +352,37 @@ const ProviderService = {
                             });
                         }
                     }
+
+                    perGame.push({
+                        gamecode: game.gamecode,
+                        api_id: game.api_id,
+                        packageCount: remotePackages.length,
+                        success: true,
+                    });
                 } catch (error) {
                     console.error(`[Partner API] Sync packages failed for game ${game.gamecode}:`, error.message);
+                    perGame.push({
+                        gamecode: game.gamecode,
+                        api_id: game.api_id,
+                        packageCount: 0,
+                        success: false,
+                        error: error.message,
+                    });
                 }
             }
 
             return {
                 success: true,
+                count: totalPackages,
+                games: perGame,
             };
         } catch (error) {
             console.error("[Partner API] Sync packages failed:", error.message);
             return {
                 success: false,
                 error: error.message,
+                count: 0,
+                games: [],
             };
         }
     },

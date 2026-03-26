@@ -72,7 +72,7 @@ const syncPartnerData = async () => {
         const ProviderService = require("../modules/nguona/nguona.service");
         const gamesResult = await ProviderService.syncGames();
         const packagesResult = gamesResult?.success
-            ? await ProviderService.syncPackages()
+            ? await ProviderService.syncPackages(gamesResult?.games || [])
             : {
                   success: false,
                   skipped: true,
