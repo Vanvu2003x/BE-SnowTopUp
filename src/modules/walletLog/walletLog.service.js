@@ -49,6 +49,12 @@ const buildWalletLogWhere = ({ search = "", mode = "all" }) => {
     return and(...conditions);
 };
 
+const assertAdminActor = (actor) => {
+    if (!actor || actor.role !== "admin") {
+        throw { status: 403, message: "Khong du quyen han" };
+    }
+};
+
 const walletLogSelection = {
     id: walletLogs.id,
     user_id: walletLogs.user_id,
@@ -61,7 +67,8 @@ const walletLogSelection = {
 };
 
 const WalletLogService = {
-    getTongTienTrongKhoang: async (userId, from, to) => {
+    getTongTienTrongKhoang: async (userId, from, to, actor) => {
+        assertAdminActor(actor);
         const conditions = [eq(walletLogs.status, "Thành Công")];
 
         if (userId) conditions.push(eq(walletLogs.user_id, userId));
@@ -80,7 +87,8 @@ const WalletLogService = {
         };
     },
 
-    getWalletLog: async (page = 1, search = "", mode = "all") => {
+    getWalletLog: async (page = 1, search = "", mode = "all", actor) => {
+        assertAdminActor(actor);
         const currentPage = normalizePage(page);
         const offset = (currentPage - 1) * PAGE_SIZE;
         const whereClause = buildWalletLogWhere({ search, mode });
@@ -113,15 +121,16 @@ const WalletLogService = {
         };
     },
 
-    getWalletLogStatusDone: async (page = 1) => {
-        return WalletLogService.getWalletLog(page, "", "success");
+    getWalletLogStatusDone: async (page = 1, actor) => {
+        return WalletLogService.getWalletLog(page, "", "success", actor);
     },
 
-    getPendingLogs: async (page = 1, search = "") => {
-        return WalletLogService.getWalletLog(page, search, "pending");
+    getPendingLogs: async (page = 1, search = "", actor) => {
+        return WalletLogService.getWalletLog(page, search, "pending", actor);
     },
 
-    getTongSoTienDaNap: async (userId) => {
+    getTongSoTienDaNap: async (userId, actor) => {
+        assertAdminActor(actor);
         const conditions = [eq(walletLogs.status, "Thành Công")];
 
         if (userId) conditions.push(eq(walletLogs.user_id, userId));
@@ -138,7 +147,8 @@ const WalletLogService = {
         };
     },
 
-    manualChargeBalance: async (id, newStatus) => {
+    manualChargeBalance: async (id, newStatus, actor) => {
+        assertAdminActor(actor);
         const [log] = await db.select().from(walletLogs).where(eq(walletLogs.id, id));
         if (!log) throw { status: 404, message: "Không tìm thấy giao dịch" };
 
@@ -155,7 +165,13 @@ const WalletLogService = {
             .where(eq(walletLogs.id, id));
 
         if (newStatus === "Thành Công") {
-            await UserService.updateBalance(log.user_id, log.amount, "credit");
+            await UserService.updateBalance(
+                log.user_id,
+                Number(log.amount),
+                "credit",
+                `Duyet giao dich nap vi #${log.id}`,
+                actor
+            );
         }
 
         return { message: "Cập nhật trạng thái thành công" };

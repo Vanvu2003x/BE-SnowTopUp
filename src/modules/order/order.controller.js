@@ -14,7 +14,7 @@ const OrderController = {
     }),
 
     acceptOrder: asyncHandler(async (req, res) => {
-        const result = await OrderService.acceptOrder(req.params.id, req.user.id);
+        const result = await OrderService.acceptOrder(req.params.id, req.user.id, req.user);
         res.json(result);
     }),
 
@@ -69,27 +69,27 @@ const OrderController = {
     }),
 
     changeOrderStatus: asyncHandler(async (req, res) => {
-        const result = await OrderService.changeOrderStatus(req.params.id, req.body.status);
+        const result = await OrderService.changeOrderStatus(req.params.id, req.body.status, req.user);
         res.json(result);
     }),
 
     completeOrder: asyncHandler(async (req, res) => {
-        const result = await OrderService.completeOrder(req.params.id);
+        const result = await OrderService.completeOrder(req.params.id, req.user);
         res.json(result);
     }),
 
     cancelOrderAndRefund: asyncHandler(async (req, res) => {
-        const result = await OrderService.cancelOrderAndRefund(req.params.id);
+        const result = await OrderService.cancelOrderAndRefund(req.params.id, req.user);
         res.json(result);
     }),
 
     syncOrderWithProvider: asyncHandler(async (req, res) => {
-        const result = await OrderService.syncOrderWithProvider(req.params.id);
+        const result = await OrderService.syncOrderWithProvider(req.params.id, req.user);
         res.json(result);
     }),
 
     syncAllExternalOrders: asyncHandler(async (req, res) => {
-        const result = await OrderService.syncAllExternalOrders();
+        const result = await OrderService.syncAllExternalOrders(req.user);
         res.json(result);
     }),
 

@@ -13,7 +13,7 @@ const UserController = {
     }),
 
     updateUserRole: asyncHandler(async (req, res) => {
-        const result = await UserService.updateUserRole(req.params.id, req.body.role);
+        const result = await UserService.updateUserRole(req.params.id, req.body.role, req.user);
         return res.status(200).json(result);
     }),
 
@@ -24,7 +24,7 @@ const UserController = {
 
     updateBalance: asyncHandler(async (req, res) => {
         const { userId, amount, type, description } = req.body;
-        const result = await UserService.updateBalance(userId, amount, type, description);
+        const result = await UserService.updateBalance(userId, amount, type, description, req.user);
         return res.status(200).json(result);
     }),
 
@@ -35,12 +35,12 @@ const UserController = {
     }),
 
     toggleUserLock: asyncHandler(async (req, res) => {
-        const result = await UserService.toggleUserLock(req.params.id);
+        const result = await UserService.toggleUserLock(req.params.id, req.user);
         return res.json(result);
     }),
 
     updateUserLevel: asyncHandler(async (req, res) => {
-        const result = await UserService.updateUserLevel(req.params.id, req.body.level);
+        const result = await UserService.updateUserLevel(req.params.id, req.body.level, req.user);
         return res.json(result);
     })
 };

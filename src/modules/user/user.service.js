@@ -101,6 +101,12 @@ const fetchUserSummary = async (role, keyword) => {
     };
 };
 
+const assertAdminActor = (actor) => {
+    if (!actor || actor.role !== "admin") {
+        throw { status: 403, message: "Khong du quyen han" };
+    }
+};
+
 const UserService = {
     getInfo: async (userId) => {
         if (!userId) {
@@ -144,7 +150,8 @@ const UserService = {
         };
     },
 
-    updateUserRole: async (targetUserId, newRole) => {
+    updateUserRole: async (targetUserId, newRole, actor) => {
+        assertAdminActor(actor);
         const [targetUser] = await db.select().from(users).where(eq(users.id, targetUserId));
 
         if (!targetUser) throw { status: 404, message: "Khong tim thay nguoi dung can cap nhat" };
@@ -189,7 +196,11 @@ const UserService = {
         return userInfo;
     },
 
-    updateBalance: async (userId, amount, type, description = "") => {
+    updateBalance: async (userId, amount, type, description = "", actor = null) => {
+        if (actor) {
+            assertAdminActor(actor);
+        }
+
         if (!userId || !amount || !type) {
             throw { status: 400, message: "Thieu tham so bat buoc" };
         }
@@ -293,7 +304,8 @@ const UserService = {
         };
     },
 
-    toggleUserLock: async (userId) => {
+    toggleUserLock: async (userId, actor) => {
+        assertAdminActor(actor);
         if (!userId) {
             throw { status: 400, message: "Thieu user ID" };
         }
@@ -322,7 +334,8 @@ const UserService = {
         };
     },
 
-    updateUserLevel: async (targetUserId, newLevel) => {
+    updateUserLevel: async (targetUserId, newLevel, actor) => {
+        assertAdminActor(actor);
         if (!targetUserId || !newLevel) {
             throw { status: 400, message: "Thieu tham so bat buoc" };
         }

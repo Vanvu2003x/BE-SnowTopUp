@@ -48,32 +48,42 @@ const WalletLogController = {
     }),
 
     getTongTienTrongKhoang: asyncHandler(async (req, res) => {
-        const result = await WalletLogService.getTongTienTrongKhoang(req.query.user_id || null, req.query.from, req.query.to);
+        const result = await WalletLogService.getTongTienTrongKhoang(
+            req.query.user_id || null,
+            req.query.from,
+            req.query.to,
+            req.user
+        );
         res.status(200).json(result);
     }),
 
     getWalletLog: asyncHandler(async (req, res) => {
-        const result = await WalletLogService.getWalletLog(req.query.page, req.query.search, req.query.mode);
+        const result = await WalletLogService.getWalletLog(
+            req.query.page,
+            req.query.search,
+            req.query.mode,
+            req.user
+        );
         res.status(200).json(result);
     }),
 
     getWalletLogStatusDone: asyncHandler(async (req, res) => {
-        const result = await WalletLogService.getWalletLogStatusDone(req.query.page);
+        const result = await WalletLogService.getWalletLogStatusDone(req.query.page, req.user);
         res.status(200).json(result);
     }),
 
     getPendingLogs: asyncHandler(async (req, res) => {
-        const result = await WalletLogService.getPendingLogs(req.query.page, req.query.search);
+        const result = await WalletLogService.getPendingLogs(req.query.page, req.query.search, req.user);
         res.status(200).json(result);
     }),
 
     getTongSoTienDaNap: asyncHandler(async (req, res) => {
-        const result = await WalletLogService.getTongSoTienDaNap(req.query.user_id || null);
+        const result = await WalletLogService.getTongSoTienDaNap(req.query.user_id || null, req.user);
         res.status(200).json(result);
     }),
 
     manualChargeBalance: asyncHandler(async (req, res) => {
-        const result = await WalletLogService.manualChargeBalance(req.query.id, req.body.newStatus);
+        const result = await WalletLogService.manualChargeBalance(req.query.id, req.body.newStatus, req.user);
         res.json(result);
     }),
 

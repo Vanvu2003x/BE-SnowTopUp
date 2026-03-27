@@ -60,6 +60,12 @@ const parseAccountInfo = (payload) => {
 
 const isPartnerSource = (apiSource) => ["partner", "nguona"].includes(String(apiSource || "").toLowerCase());
 
+const assertAdminActor = (actor) => {
+    if (!actor || actor.role !== "admin") {
+        throw { status: 403, message: "Khong du quyen han" };
+    }
+};
+
 const mapExternalStatus = (status) => {
     const normalized = String(status || "").trim().toUpperCase();
 
@@ -325,7 +331,8 @@ const OrderService = {
         }
     },
 
-    syncOrderWithProvider: async (orderId) => {
+    syncOrderWithProvider: async (orderId, actor) => {
+        assertAdminActor(actor);
         const ProviderService = require("../nguona/nguona.service");
         const [order] = await db.select().from(orders).where(eq(orders.id, orderId));
 
@@ -366,12 +373,12 @@ const OrderService = {
 
         if (localStatus === "success") {
             if (order.status !== "success") {
-                await OrderService.completeOrder(order.id);
+                await OrderService.completeOrder(order.id, actor);
                 updated = true;
             }
         } else if (localStatus === "cancelled") {
             if (!["cancelled", "failed"].includes(order.status)) {
-                await OrderService.cancelOrderAndRefund(order.id);
+                await OrderService.cancelOrderAndRefund(order.id, actor);
                 updated = true;
             }
         } else if (localStatus === "partial") {
@@ -397,7 +404,8 @@ const OrderService = {
         };
     },
 
-    syncAllExternalOrders: async () => {
+    syncAllExternalOrders: async (actor) => {
+        assertAdminActor(actor);
         const syncableOrders = await db
             .select({ id: orders.id })
             .from(orders)
@@ -407,7 +415,7 @@ const OrderService = {
 
         for (const order of syncableOrders) {
             try {
-                const result = await OrderService.syncOrderWithProvider(order.id);
+                const result = await OrderService.syncOrderWithProvider(order.id, actor);
                 if (result?.updated) {
                     updated += 1;
                 }
@@ -561,7 +569,8 @@ const OrderService = {
         };
     },
 
-    acceptOrder: async (id, adminId) => {
+    acceptOrder: async (id, adminId, actor) => {
+        assertAdminActor(actor);
         const [order] = await db.select().from(orders).where(eq(orders.id, id));
         if (!order) throw { status: 404, message: "Đơn hàng không tồn tại" };
 
@@ -577,7 +586,10 @@ const OrderService = {
         return OrderService.getOrderById(id);
     },
 
-    changeOrderStatus: async (id, status) => {
+    changeOrderStatus: async (id, status, actor) => {
+        if (actor) {
+            assertAdminActor(actor);
+        }
         await db.update(orders).set({ status, updated_at: new Date() }).where(eq(orders.id, id));
         const base = buildOrderQuery();
         const [updated] = await base.joins(db.select(base.selection).from(base.from)).where(eq(orders.id, id));
@@ -624,8 +636,11 @@ const OrderService = {
         return { message: "Cancelled and refunded" };
     },
 
-    completeOrder: async (id) => {
-        const updatedOrder = await OrderService.changeOrderStatus(id, "success");
+    completeOrder: async (id, actor) => {
+        if (actor) {
+            assertAdminActor(actor);
+        }
+        const updatedOrder = await OrderService.changeOrderStatus(id, "success", actor);
 
         try {
             emitToUser(updatedOrder.user_id, "order_status_update", {
@@ -650,7 +665,10 @@ const OrderService = {
         return updatedOrder;
     },
 
-    cancelOrderAndRefund: async (id) => {
+    cancelOrderAndRefund: async (id, actor) => {
+        if (actor) {
+            assertAdminActor(actor);
+        }
         const order = await OrderService.getOrderById(id);
         if (!order) throw { status: 404, message: "Đơn hàng không tồn tại" };
 

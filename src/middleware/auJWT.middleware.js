@@ -61,22 +61,22 @@ const checkRoleMDW = async (req, res, next) => {
     }
 
     const userDecoded = tokenResult.decoded;
-    let isAdmin = false;
+    let adminUser = null;
     try {
       const user = await UserService.getUserById(userDecoded.id);
       if (user && user.role === 'admin') {
-        isAdmin = true;
+        adminUser = user;
       }
     } catch (err) {
       console.error("Lỗi khi kiểm tra quyền:", err);
       // Fallthrough to forbidden
     }
 
-    if (!isAdmin) {
+    if (!adminUser) {
       return res.status(403).json({ message: "Không đủ quyền hạn" });
     }
 
-    req.user = userDecoded; // Or fetch full user? Original decoded is just JWT payload.
+    req.user = { ...userDecoded, ...adminUser };
     next();
   } catch (error) {
     console.error("Lỗi middleware checkRoleMDW:", error);

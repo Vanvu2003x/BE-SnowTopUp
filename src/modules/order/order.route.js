@@ -13,11 +13,11 @@ router.get('/transaction-history', checkToken, OrderController.getTransactionHis
 router.get('/financial-summary', checkToken, OrderController.getUserFinancialSummary);
 router.get('/summary', checkToken, OrderController.getUserFinancialSummary);
 
-// Agent routes (require login)
-router.get('/receive/summary', checkToken, OrderController.getOrderSummary3);
-router.get('/mynap', checkToken, OrderController.getMyNapOrdersStats);
-router.get('/receive/stats', checkToken, OrderController.getMyNapOrdersStats);
-router.post('/:id/accept', checkToken, OrderController.acceptOrder);
+// Moderation routes (admin only)
+router.get('/receive/summary', checkRoleMDW, OrderController.getOrderSummary3);
+router.get('/mynap', checkRoleMDW, OrderController.getMyNapOrdersStats);
+router.get('/receive/stats', checkRoleMDW, OrderController.getMyNapOrdersStats);
+router.post('/:id/accept', checkRoleMDW, OrderController.acceptOrder);
 
 // Admin only routes (require admin role)
 router.get('/', checkRoleMDW, OrderController.getAllOrders);
