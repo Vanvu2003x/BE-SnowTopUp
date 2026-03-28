@@ -208,6 +208,31 @@ const findExistingPackage = async (gameId, apiId, packageName) => {
     return existing || null;
 };
 
+const buildPackageSourceKey = ({ apiId = null, packageName = null }) => {
+    const normalizedApiId = sanitizeApiId(apiId);
+    if (normalizedApiId) {
+        return `api:${normalizedApiId}`;
+    }
+
+    const normalizedName = String(packageName || "").trim().toLowerCase();
+    if (normalizedName) {
+        return `name:${normalizedName}`;
+    }
+
+    return null;
+};
+
+const getLocalPackageSourceKey = (pkg) => {
+    if (!pkg?.api_id && !pkg?.api_package_name) {
+        return null;
+    }
+
+    return buildPackageSourceKey({
+        apiId: pkg?.api_id,
+        packageName: pkg?.api_package_name || pkg?.package_name,
+    });
+};
+
 const upsertRemoteGame = async (remoteGame) => {
     const apiId = sanitizeApiId(remoteGame?.id);
     const gamecode = (remoteGame?.slug || remoteGame?.gamecode || slugify(remoteGame?.displayName || remoteGame?.name)).substring(0, 50);
@@ -445,6 +470,7 @@ const ProviderService = {
                         `[Partner API] Packages fetched for ${game.gamecode}: source=${source.mode}:${source.endpoint} total=${remotePackages.length}${packagePreview ? ` | preview=${packagePreview}` : ""}`
                     );
                     totalPackages += remotePackages.length;
+                    const seenPackageKeys = new Set();
                     const packageType = inferPackageType(game?.input_fields || []);
                     const defaultRequiresIdServer = inferRequiresIdServer(game?.input_fields || []);
                     let gameDeactivatedCount = 0;
@@ -453,6 +479,10 @@ const ProviderService = {
                     for (const remotePackage of remotePackages) {
                         const apiId = sanitizeApiId(remotePackage?.id);
                         const packageName = remotePackage?.displayName || remotePackage?.name || `Goi ${apiId}`;
+                        const sourceKey = buildPackageSourceKey({ apiId, packageName });
+                        if (sourceKey) {
+                            seenPackageKeys.add(sourceKey);
+                        }
                         const existingPackage = await findExistingPackage(game.id, apiId, packageName);
                         const pricing = buildPricing(game, existingPackage, remotePackage);
                         const fileAPI = buildPackageFileApi(game, remotePackage);
@@ -522,6 +552,33 @@ const ProviderService = {
                             gameReactivatedCount += 1;
                         }
                     }
+                    const localPackages = await db
+                        .select({
+                            id: topupPackages.id,
+                            api_id: topupPackages.api_id,
+                            api_package_name: topupPackages.api_package_name,
+                            package_name: topupPackages.package_name,
+                            status: topupPackages.status,
+                        })
+                        .from(topupPackages)
+                        .where(eq(topupPackages.game_id, game.id));
+
+                    for (const localPackage of localPackages) {
+                        const localKey = getLocalPackageSourceKey(localPackage);
+                        if (!localKey || seenPackageKeys.has(localKey)) {
+                            continue;
+                        }
+
+                        if (localPackage.status !== "inactive") {
+                            await db
+                                .update(topupPackages)
+                                .set({ status: "inactive" })
+                                .where(eq(topupPackages.id, localPackage.id));
+                            gameDeactivatedCount += 1;
+                            deactivatedCount += 1;
+                        }
+                    }
+
                     perGame.push({
                         gamecode: game.gamecode,
                         api_id: game.api_id,
@@ -622,3 +679,4 @@ const ProviderService = {
 };
 
 module.exports = ProviderService;
+
